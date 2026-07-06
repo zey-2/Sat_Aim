@@ -6,20 +6,31 @@ import requests
 import streamlit as st
 
 CELESTRAK_URL = "https://celestrak.org/NORAD/elements/gp.php"
+CELESTRAK_GROUP = "sar"
 
-SAR_CONSTELLATIONS: list[str] = [
-    "Sentinel-1A",
-    "Sentinel-1B",
-    "Sentinel-1C",
-    "Sentinel-1D",
-    "RADARSAT-2",
-    "RADARSAT Constellation",
+# Common SAR satellite name prefixes for filtering.
+# Each entry is a case-insensitive substring matched against the TLE name.
+SAR_SATELLITES: list[str] = [
+    "Sentinel-1",
+    "RADARSAT",
+    "RCM",
     "Capella",
     "UMBRA",
     "ICEYE",
     "HawkEye",
-    "Kondor-FKA",
+    "Kondor",
     "NovaSAR",
+    "NOVASAR",
+    "SAOCOM",
+    "COSMO-SkyMed",
+    "TerraSAR",
+    "TanDEM",
+    "CSG",
+    "PAZ",
+    "ALOS",
+    "GAOFEN",
+    "RISAT",
+    "SAR-LUPE",
 ]
 
 
@@ -168,17 +179,16 @@ def validate_tle(line1: str, line2: str) -> bool:
 
 @st.cache_data(ttl=3600)
 def fetch_tle_celestrak(
-    constellation: str,
     satellite: str | None = None,
 ) -> list[tuple[tuple[str, str], str]]:
-    """Fetch TLE data from CelesTrak for a given constellation or satellite.
+    """Fetch SAR satellite TLE data from CelesTrak.
+
+    Fetches from the CelesTrak 'sar' group and optionally filters by
+    satellite name substring.
 
     Args:
-        constellation: The constellation GROUP name used by CelesTrak
-            (e.g. "active", "starlink", or a custom group).
-        satellite: Optional specific satellite name to filter from the
-            results. Only TLEs whose name contains this substring
-            (case-insensitive) are returned.
+        satellite: Optional satellite name substring to filter results
+            (case-insensitive). If None, returns all SAR satellites.
 
     Returns:
         A list of ((line1, line2), name) tuples. The name is always a
@@ -188,7 +198,7 @@ def fetch_tle_celestrak(
         ValueError: If the fetch returns zero matching TLEs.
         RuntimeError: If the HTTP request fails.
     """
-    params: dict[str, str] = {"GROUP": constellation, "FORMAT": "tle"}
+    params: dict[str, str] = {"GROUP": CELESTRAK_GROUP, "FORMAT": "tle"}
     response = requests.get(CELESTRAK_URL, params=params, timeout=30)
     if not response.ok:
         raise RuntimeError(
@@ -211,7 +221,7 @@ def fetch_tle_celestrak(
     if not results:
         filter_msg = f" for satellite '{satellite}'" if satellite else ""
         raise ValueError(
-            f"No TLEs found for constellation '{constellation}'{filter_msg}"
+            f"No TLEs found in CelesTrak '{CELESTRAK_GROUP}' group{filter_msg}"
         )
 
     return results

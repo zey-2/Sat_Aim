@@ -22,7 +22,7 @@ import streamlit as st
 from core.export import export_csv_card, export_csv_raw, export_pdf_card
 from core.magnetic import magnetic_declination
 from core.propagator import LosState, SatAim, Window
-from core.tle import SAR_CONSTELLATIONS, fetch_tle_celestrak, parse_tle, validate_tle
+from core.tle import SAR_SATELLITES, fetch_tle_celestrak, parse_tle, validate_tle
 
 # Folium imports -- guard so the app still loads if the package is missing.
 try:
@@ -55,11 +55,10 @@ tle_lines: tuple[str, str] | None = None
 sat_name: str | None = None
 
 if tle_mode == "Celestrak":
-    constellation = st.sidebar.selectbox("Constellation", SAR_CONSTELLATIONS)
     sat_filter = st.sidebar.text_input("Satellite name filter (substring)")
     try:
         tle_list = fetch_tle_celestrak(
-            constellation, sat_filter if sat_filter else None
+            sat_filter if sat_filter else None
         )
         sat_options = [name for _, name in tle_list]
         chosen = st.sidebar.selectbox("Satellite", sat_options) if sat_options else None
