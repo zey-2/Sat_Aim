@@ -13,9 +13,30 @@ from typing import Literal
 
 import numpy as np
 from scipy.optimize import brentq
-from skyfield.api import EarthSatellite, load, wgs84
+from skyfield.api import EarthSatellite, Loader, wgs84
 
 from core.magnetic import magnetic_declination
+
+# ---------------------------------------------------------------------------
+# Cached ephemeris loader (downloads de421.bsp on first use)
+# ---------------------------------------------------------------------------
+_skyfield_loader = Loader(".")
+_ts = None
+_eph = None
+
+
+def _get_timescale():
+    global _ts
+    if _ts is None:
+        _ts = _skyfield_loader.timescale()
+    return _ts
+
+
+def _get_ephemeris():
+    global _eph
+    if _eph is None:
+        _eph = _skyfield_loader("de421.bsp")
+    return _eph
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +129,7 @@ class SatAim:
         lon: float,
         height_m: float,
     ) -> None:
-        self.ts = load.timescale()
+        self.ts = _get_timescale()
         self.sat = EarthSatellite(tle_lines[0], tle_lines[1], name, self.ts)
         self.name = name or self.sat.name
         self.site = wgs84.latlon(lat, lon, height_m)
@@ -175,7 +196,7 @@ class SatAim:
         ascending = radial_vel > 0.0
 
         # Sunlit: dot-product shadow test
-        eph = load("de421.bsp")
+        eph = _get_ephemeris()
         sat_pos = sat_geo.position.km
         sun_pos = eph["earth"].at(t_sf).observe(eph["sun"]).position.km
         sat_to_sun = sun_pos - sat_pos

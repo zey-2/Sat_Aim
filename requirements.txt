@@ -1,0 +1,12 @@
+streamlit>=1.58.0
+numpy>=2.5.0
+pandas>=3.0.0
+plotly>=6.8.0
+sgp4>=2.27
+skyfield>=1.54
+requests>=2.32.0
+fpdf2>=2.8.0
+pygeomag>=1.1.0
+scipy>=1.18.0
+folium>=0.18.0
+streamlit-folium>=0.24.0
