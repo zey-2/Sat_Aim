@@ -21,7 +21,7 @@ import streamlit as st
 
 from core.export import export_csv_card, export_csv_raw, export_pdf_card
 from core.magnetic import magnetic_declination
-from core.propagator import LosState, SatAim, Window
+from core.propagator import LosState, PassInfo, SatAim, Window
 from core.tle import SAR_SATELLITES, fetch_tle_celestrak, parse_tle, validate_tle
 
 # Folium imports -- guard so the app still loads if the package is missing.
@@ -96,8 +96,12 @@ height_m = st.sidebar.slider("Site height (m)", min_value=0, max_value=5000, val
 st.sidebar.divider()
 st.sidebar.header("Scene Center Time (UTC)")
 
-scene_date = st.sidebar.date_input("Date", value=datetime(2026, 7, 7).date())
-scene_time = st.sidebar.time_input("Time", value=datetime(2026, 7, 7, 14, 23, 11).time())
+# Pre-fill from session state if user jumped to a pass time.
+_jump: datetime | None = st.session_state.pop("_jump_time", None)
+_default_dt = _jump if _jump is not None else datetime(2026, 7, 7, 14, 23, 11)
+
+scene_date = st.sidebar.date_input("Date", value=_default_dt.date())
+scene_time = st.sidebar.time_input("Time", value=_default_dt.time(), step=60)
 
 st.sidebar.divider()
 st.sidebar.header("Window Parameters")
@@ -121,6 +125,9 @@ def _make_key(t_center: datetime, criterion: str, half_width: float) -> tuple:
     return (t_center.isoformat(), criterion, half_width)
 
 
+_RESULTS_KEY = "_sat_aim_results"
+
+
 def run_computation(
     tle_lines: tuple[str, str],
     sat_name: str | None,
@@ -133,11 +140,11 @@ def run_computation(
 ) -> dict:
     """Run the SatAim computation and return a results dict.
 
-    Cached in st.session_state keyed by (t_center, criterion, half_width).
+    Cached in st.session_state under _RESULTS_KEY.
     """
     key = _make_key(t_center, criterion, half_width)
-    if key in st.session_state:
-        return st.session_state[key]
+    if _RESULTS_KEY in st.session_state and st.session_state[_RESULTS_KEY].get("_key") == key:
+        return st.session_state[_RESULTS_KEY]
 
     sat_aim = SatAim(tle_lines, sat_name, lat, lon, height_m)
     ref_state = sat_aim.state_at(t_center)
@@ -146,12 +153,12 @@ def run_computation(
     # Build the 1-second table over the window.
     n_steps = int(window.duration_s) + 1
     times = [window.t_start_utc + timedelta(seconds=i) for i in range(n_steps)]
+    raw_states = [sat_aim.state_at(t) for t in times]
     rows = []
-    for t in times:
-        st_row = sat_aim.state_at(t)
+    for st_row in raw_states:
         rows.append(
             {
-                "Time": t.strftime("%Y-%m-%d %H:%M:%S"),
+                "Time": st_row.t_utc.strftime("%Y-%m-%d %H:%M:%S"),
                 "Az True": round(st_row.az_true_deg, 2),
                 "Az Mag": round(st_row.az_mag_deg, 2),
                 "El": round(st_row.el_deg, 2),
@@ -172,10 +179,12 @@ def run_computation(
     mag_dec = magnetic_declination(lat, lon, height_m, mag_year)
 
     results = {
+        "_key": key,
         "sat_aim": sat_aim,
         "ref_state": ref_state,
         "window": window,
         "df_raw": df_raw,
+        "raw_states": raw_states,
         "times_geo": times_geo,
         "az_geo": az_geo,
         "el_geo": el_geo,
@@ -184,7 +193,7 @@ def run_computation(
         "criterion": criterion,
         "half_width": half_width,
     }
-    st.session_state[key] = results
+    st.session_state[_RESULTS_KEY] = results
     return results
 
 
@@ -198,6 +207,36 @@ if compute_btn:
             run_computation(
                 tle_lines, sat_name, lat, lon, height_m, t_center, criterion, half_width
             )
+        except ValueError as exc:
+            msg = str(exc)
+            if "below the horizon" in msg:
+                # Satellite is below horizon — find the next pass.
+                sat_aim = SatAim(tle_lines, sat_name, lat, lon, height_m)
+                try:
+                    pass_info = sat_aim.next_pass(t_center, max_search_h=24)
+                    st.warning(
+                        f"Satellite is **below the horizon** at the requested time "
+                        f"(el = {sat_aim.state_at(t_center).el_deg:.1f}°).\n\n"
+                        f"**Next pass:**  "
+                        f"rise {pass_info.rise_utc.strftime('%H:%M:%S')} UTC "
+                        f"(az {pass_info.rise_az_deg:.0f}°) → "
+                        f"peak {pass_info.peak_utc.strftime('%H:%M:%S')} UTC "
+                        f"(el {pass_info.max_el_deg:.1f}°) → "
+                        f"set {pass_info.set_utc.strftime('%H:%M:%S')} UTC "
+                        f"(az {pass_info.set_az_deg:.0f}°)  "
+                        f"— duration {pass_info.duration_s:.0f} s"
+                    )
+                    # Offer a button to jump to the pass peak time.
+                    if st.button(
+                        f"Use peak time ({pass_info.peak_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC)",
+                        type="primary",
+                    ):
+                        st.session_state["_jump_time"] = pass_info.peak_utc
+                        st.rerun()
+                except ValueError as exc2:
+                    st.error(f"Satellite is below horizon and no pass found in 24 h: {exc2}")
+            else:
+                st.error(f"Computation failed: {exc}")
         except Exception as exc:
             st.error(f"Computation failed: {exc}")
 
@@ -206,12 +245,7 @@ if compute_btn:
 # Retrieve the latest cached results (if any).
 # ---------------------------------------------------------------------------
 
-_results: dict | None = None
-if st.session_state:
-    # Find the most recent key (last inserted).
-    keys = [k for k in st.session_state if isinstance(k, tuple) and len(k) == 3]
-    if keys:
-        _results = st.session_state[keys[-1]]
+_results: dict | None = st.session_state.get(_RESULTS_KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -275,14 +309,15 @@ with tab1:
         # Download buttons.
         st.divider()
         dl1, dl2 = st.columns(2)
-        csv_card_bytes = export_csv_card(ref, win, _results["mag_dec"])
+        sa: SatAim = _results["sat_aim"]
+        csv_card_bytes = export_csv_card(win, ref, sa.name, sa.lat, sa.lon, sa.height_m)
         dl1.download_button(
             "Download CSV Card",
             data=csv_card_bytes,
             file_name="pointing_card.csv",
             mime="text/csv",
         )
-        pdf_card_bytes = export_pdf_card(ref, win, _results["mag_dec"])
+        pdf_card_bytes = export_pdf_card(win, ref, sa.name, sa.lat, sa.lon, sa.height_m)
         dl2.download_button(
             "Download PDF Card",
             data=pdf_card_bytes,
@@ -367,7 +402,7 @@ with tab2:
             height=500,
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 
 # ===== Tab 3 -- Sky Plot ===================================================
@@ -441,7 +476,7 @@ with tab3:
             height=550,
         )
 
-        st.plotly_chart(fig_sky, use_container_width=True)
+        st.plotly_chart(fig_sky, width="stretch")
 
 
 # ===== Tab 4 -- Map ========================================================
@@ -499,12 +534,12 @@ with tab5:
         st.subheader("Raw Data Table (1-second intervals)")
         st.dataframe(
             df_raw,
-            use_container_width=True,
+            width="stretch",
             height=600,
         )
 
         # CSV download.
-        csv_raw_bytes = export_csv_raw(df_raw)
+        csv_raw_bytes = export_csv_raw(_results["raw_states"])
         st.download_button(
             "Download Raw CSV",
             data=csv_raw_bytes,
@@ -647,7 +682,7 @@ This is the primary criterion used to define the pointing window.
         title="Solver: f(t) and bracket detection",
         height=450,
     )
-    st.plotly_chart(fig_solver, use_container_width=True)
+    st.plotly_chart(fig_solver, width="stretch")
 
     # --- Section 4: Magnetic Declination ------------------------------------
     st.subheader("4. Magnetic Declination")

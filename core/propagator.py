@@ -50,6 +50,19 @@ class Window:
     half_width_deg: float
 
 
+@dataclass
+class PassInfo:
+    """Rise / peak / set times and geometry for a single satellite pass."""
+
+    rise_utc: datetime
+    peak_utc: datetime
+    set_utc: datetime
+    duration_s: float
+    max_el_deg: float
+    rise_az_deg: float        # azimuth at rise
+    set_az_deg: float         # azimuth at set
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -340,4 +353,150 @@ class SatAim:
             clamped_by_horizon=clamped_by_horizon,
             criterion=criterion,
             half_width_deg=hw,
+        )
+
+    # ------------------------------------------------------------------
+    # Next pass finder
+    # ------------------------------------------------------------------
+
+    def next_pass(
+        self,
+        t_utc: datetime,
+        max_search_h: float = 24.0,
+        step_s: float = 30.0,
+        tol_s: float = 0.1,
+        mag_year: int | None = None,
+    ) -> PassInfo:
+        """Find the next satellite pass after *t_utc*.
+
+        Scans forward from *t_utc* in coarse steps until the satellite
+        rises above the horizon, then refines rise/peak/set times with
+        Brent's method.
+
+        Parameters
+        ----------
+        t_utc : datetime
+            Start of the search (timezone-aware UTC, or naive treated as UTC).
+        max_search_h : float
+            Maximum hours to search forward before giving up.
+        step_s : float
+            Coarse scan step in seconds.
+        tol_s : float
+            Tolerance for Brent root-finder, in seconds.
+        mag_year : int or None
+            Decimal year for the magnetic model.
+
+        Returns
+        -------
+        PassInfo
+
+        Raises
+        ------
+        ValueError
+            If no pass is found within *max_search_h* hours.
+        """
+        if t_utc.tzinfo is None:
+            t_utc = t_utc.replace(tzinfo=timezone.utc)
+
+        max_search_s = max_search_h * 3600.0
+
+        # -- elevation function -----------------------------------------------
+        def el_at(dt_s: float) -> float:
+            t = t_utc + timedelta(seconds=dt_s)
+            return self.state_at(t, mag_year=mag_year).el_deg
+
+        # -- coarse scan: find first dt where el > 0 --------------------------
+        n_steps = int(max_search_s / step_s)
+        prev_dt = 0.0
+        prev_el = el_at(0.0)
+
+        rise_dt = None
+        for i in range(1, n_steps + 1):
+            cur_dt = float(i) * step_s
+            cur_el = el_at(cur_dt)
+            if prev_el <= 0.0 and cur_el > 0.0:
+                # Bracket found: rise is between prev_dt and cur_dt.
+                rise_dt = brentq(lambda s: el_at(s), prev_dt, cur_dt, xtol=tol_s)
+                break
+            prev_dt = cur_dt
+            prev_el = cur_el
+
+        if rise_dt is None:
+            raise ValueError(
+                f"No pass found within {max_search_h:.0f} h of {t_utc.isoformat()}"
+            )
+
+        # -- find peak: scan forward from rise until el starts decreasing -----
+        t_rise = t_utc + timedelta(seconds=rise_dt)
+        peak_dt = rise_dt
+        peak_el = el_at(rise_dt)
+
+        # Scan in step_s increments past rise to find the peak region.
+        scan_start = rise_dt
+        scan_end = rise_dt + max_search_s  # generous upper bound
+        prev_dt = rise_dt
+        prev_el = peak_el
+
+        peak_found = False
+        for i in range(1, int((scan_end - scan_start) / step_s) + 1):
+            cur_dt = scan_start + float(i) * step_s
+            cur_el = el_at(cur_dt)
+            if cur_el <= 0.0:
+                # Set happened between prev_dt and cur_dt.  Peak was the
+                # maximum we saw.
+                peak_found = True
+                break
+            if cur_el > peak_el:
+                peak_el = cur_el
+                peak_dt = cur_dt
+            prev_dt = cur_dt
+            prev_el = cur_el
+
+        if not peak_found:
+            raise ValueError("Could not determine pass peak (search exhausted).")
+
+        # Refine peak with golden-section search on [-step, +step] around peak_dt
+        # Simple approach: scan finer grid around peak_dt
+        fine_step = max(step_s / 10.0, tol_s * 2)
+        best_dt = peak_dt
+        best_el = peak_el
+        for delta in np.arange(-step_s, step_s + fine_step, fine_step):
+            cand_dt = peak_dt + delta
+            if cand_dt < rise_dt:
+                continue
+            cand_el = el_at(cand_dt)
+            if cand_el > best_el:
+                best_el = cand_el
+                best_dt = cand_dt
+        peak_dt = best_dt
+
+        # -- find set: bracket el crossing 0 after peak -----------------------
+        prev_dt = peak_dt
+        prev_el = el_at(peak_dt)
+        set_dt = None
+        for i in range(1, int(max_search_s / step_s) + 1):
+            cur_dt = peak_dt + float(i) * step_s
+            cur_el = el_at(cur_dt)
+            if prev_el > 0.0 and cur_el <= 0.0:
+                set_dt = brentq(lambda s: el_at(s), prev_dt, cur_dt, xtol=tol_s)
+                break
+            prev_dt = cur_dt
+            prev_el = cur_el
+
+        if set_dt is None:
+            raise ValueError("Could not determine pass set time.")
+
+        # -- build result ------------------------------------------------------
+        t_set = t_utc + timedelta(seconds=set_dt)
+        rise_state = self.state_at(t_rise, mag_year=mag_year)
+        set_state = self.state_at(t_set, mag_year=mag_year)
+
+        return PassInfo(
+            rise_utc=t_rise,
+            peak_utc=t_utc + timedelta(seconds=peak_dt),
+            set_utc=t_set,
+            duration_s=set_dt - rise_dt,
+            max_el_deg=best_el,
+            rise_az_deg=rise_state.az_true_deg,
+            set_az_deg=set_state.az_true_deg,
         )

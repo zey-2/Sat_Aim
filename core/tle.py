@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
 import requests
 import streamlit as st
 
 CELESTRAK_URL = "https://celestrak.org/NORAD/elements/gp.php"
 CELESTRAK_GROUP = "sar"
+
+# Local cache file for TLE fallback when CelesTrak is unreachable.
+_TLE_CACHE_DIR = Path.home() / ".cache" / "sat_aim"
+_TLE_CACHE_FILE = _TLE_CACHE_DIR / "tle_cache.json"
 
 # Common SAR satellite name prefixes for filtering.
 # Each entry is a case-insensitive substring matched against the TLE name.
@@ -145,6 +153,8 @@ def validate_tle(line1: str, line2: str) -> bool:
         True if both lines are valid, False otherwise.
     """
     try:
+        line1 = line1.rstrip()
+        line2 = line2.rstrip()
         if len(line1) != 69 or len(line2) != 69:
             return False
         if not line1.startswith("1 ") or not line2.startswith("2 "):
@@ -177,6 +187,25 @@ def validate_tle(line1: str, line2: str) -> bool:
         return False
 
 
+def _save_tle_cache(tle_text: str) -> None:
+    """Save raw TLE text to a local cache file for offline fallback."""
+    try:
+        _TLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _TLE_CACHE_FILE.write_text(tle_text, encoding="utf-8")
+    except OSError:
+        pass  # non-critical; just skip caching
+
+
+def _load_tle_cache() -> str | None:
+    """Load raw TLE text from the local cache file, or None if missing."""
+    try:
+        if _TLE_CACHE_FILE.is_file():
+            return _TLE_CACHE_FILE.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    return None
+
+
 @st.cache_data(ttl=3600)
 def fetch_tle_celestrak(
     satellite: str | None = None,
@@ -184,7 +213,8 @@ def fetch_tle_celestrak(
     """Fetch SAR satellite TLE data from CelesTrak.
 
     Fetches from the CelesTrak 'sar' group and optionally filters by
-    satellite name substring.
+    satellite name substring. Falls back to a local cache file when
+    CelesTrak is unreachable.
 
     Args:
         satellite: Optional satellite name substring to filter results
@@ -196,17 +226,32 @@ def fetch_tle_celestrak(
 
     Raises:
         ValueError: If the fetch returns zero matching TLEs.
-        RuntimeError: If the HTTP request fails.
+        RuntimeError: If the HTTP request fails and no cache is available.
     """
-    params: dict[str, str] = {"GROUP": CELESTRAK_GROUP, "FORMAT": "tle"}
-    response = requests.get(CELESTRAK_URL, params=params, timeout=30)
-    if not response.ok:
-        raise RuntimeError(
-            f"CelesTrak request failed with status {response.status_code}: "
-            f"{response.text}"
-        )
+    tle_text: str | None = None
+    from_cache = False
 
-    parsed = parse_tle_file_text(response.text)
+    params: dict[str, str] = {"GROUP": CELESTRAK_GROUP, "FORMAT": "tle"}
+    try:
+        response = requests.get(CELESTRAK_URL, params=params, timeout=30)
+        if not response.ok:
+            raise RuntimeError(
+                f"CelesTrak status {response.status_code}"
+            )
+        tle_text = response.text
+        _save_tle_cache(tle_text)
+    except (RuntimeError, requests.RequestException) as exc:
+        # CelesTrak unreachable — try local cache
+        cached = _load_tle_cache()
+        if cached is not None:
+            tle_text = cached
+            from_cache = True
+        else:
+            raise RuntimeError(
+                f"CelesTrak fetch failed ({exc}) and no local cache available"
+            ) from exc
+
+    parsed = parse_tle_file_text(tle_text)
 
     # Ensure every entry has a name
     results: list[tuple[tuple[str, str], str]] = []
@@ -220,9 +265,13 @@ def fetch_tle_celestrak(
 
     if not results:
         filter_msg = f" for satellite '{satellite}'" if satellite else ""
+        cache_msg = " from local cache" if from_cache else ""
         raise ValueError(
-            f"No TLEs found in CelesTrak '{CELESTRAK_GROUP}' group{filter_msg}"
+            f"No TLEs found in CelesTrak '{CELESTRAK_GROUP}' group{filter_msg}{cache_msg}"
         )
+
+    if from_cache:
+        st.sidebar.warning("Using cached TLE data (CelesTrak unreachable)")
 
     return results
 
