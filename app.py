@@ -22,7 +22,14 @@ import streamlit as st
 from core.export import export_csv_card, export_csv_raw, export_pdf_card
 from core.magnetic import magnetic_declination
 from core.propagator import LosState, PassInfo, SatAim, Window
-from core.tle import SAR_SATELLITES, fetch_tle_celestrak, parse_tle, validate_tle
+from core.tle import fetch_tle_celestrak, parse_tle, validate_tle
+from core.ui_state import (
+    PASS_SUGGESTION_KEY,
+    RESULTS_KEY as _RESULTS_KEY,
+    SCENE_DATE_KEY,
+    SCENE_TIME_KEY,
+    prefill_scene_center_from_peak,
+)
 
 # Folium imports -- guard so the app still loads if the package is missing.
 try:
@@ -43,6 +50,10 @@ st.set_page_config(page_title="Sat Aim", layout="wide")
 st.title("Sat Aim -- Satellite Pointing Geometry")
 
 
+def _use_peak_time(peak_utc: datetime) -> None:
+    prefill_scene_center_from_peak(st.session_state, peak_utc)
+
+
 # ---------------------------------------------------------------------------
 # 2. Sidebar inputs
 # ---------------------------------------------------------------------------
@@ -57,9 +68,7 @@ sat_name: str | None = None
 if tle_mode == "Celestrak":
     sat_filter = st.sidebar.text_input("Satellite name filter (substring)")
     try:
-        tle_list = fetch_tle_celestrak(
-            sat_filter if sat_filter else None
-        )
+        tle_list = fetch_tle_celestrak(sat_filter if sat_filter else None)
         sat_options = [name for _, name in tle_list]
         chosen = st.sidebar.selectbox("Satellite", sat_options) if sat_options else None
         if chosen:
@@ -96,17 +105,11 @@ height_m = st.sidebar.slider("Site height (m)", min_value=0, max_value=5000, val
 st.sidebar.divider()
 st.sidebar.header("Scene Center Time (UTC)")
 
-# Pre-fill from session state if user jumped to a pass time.
-_jump: datetime | None = st.session_state.pop("_jump_time", None)
-if _jump is not None:
-    st.session_state["_scene_date"] = _jump.date()
-    st.session_state["_scene_time"] = _jump.time()
+st.session_state.setdefault(SCENE_DATE_KEY, datetime(2026, 7, 7).date())
+st.session_state.setdefault(SCENE_TIME_KEY, datetime(2026, 7, 7, 14, 23, 11).time())
 
-_default_date = st.session_state.get("_scene_date", datetime(2026, 7, 7).date())
-_default_time = st.session_state.get("_scene_time", datetime(2026, 7, 7, 14, 23, 11).time())
-
-scene_date = st.sidebar.date_input("Date", value=_default_date, key="_scene_date")
-scene_time = st.sidebar.time_input("Time", value=_default_time, step=60, key="_scene_time")
+scene_date = st.sidebar.date_input("Date", key=SCENE_DATE_KEY)
+scene_time = st.sidebar.time_input("Time", step=60, key=SCENE_TIME_KEY)
 
 st.sidebar.divider()
 st.sidebar.header("Window Parameters")
@@ -121,16 +124,14 @@ half_width = st.sidebar.slider("Half-width (deg)", min_value=1, max_value=45, va
 compute_btn = st.sidebar.button("Compute", type="primary", use_container_width=True)
 
 
-# ---------------------------------------------------------------------------
-# 3. Session state caching
-# ---------------------------------------------------------------------------
-
 def _make_key(t_center: datetime, criterion: str, half_width: float) -> tuple:
     """Build a hashable cache key from the computation parameters."""
     return (t_center.isoformat(), criterion, half_width)
 
 
-_RESULTS_KEY = "_sat_aim_results"
+# ---------------------------------------------------------------------------
+# 3. Session state caching
+# ---------------------------------------------------------------------------
 
 
 def run_computation(
@@ -148,7 +149,10 @@ def run_computation(
     Cached in st.session_state under _RESULTS_KEY.
     """
     key = _make_key(t_center, criterion, half_width)
-    if _RESULTS_KEY in st.session_state and st.session_state[_RESULTS_KEY].get("_key") == key:
+    if (
+        _RESULTS_KEY in st.session_state
+        and st.session_state[_RESULTS_KEY].get("_key") == key
+    ):
         return st.session_state[_RESULTS_KEY]
 
     sat_aim = SatAim(tle_lines, sat_name, lat, lon, height_m)
@@ -204,6 +208,7 @@ def run_computation(
 
 # Trigger computation when the button is pressed.
 if compute_btn:
+    st.session_state.pop(PASS_SUGGESTION_KEY, None)
     if tle_lines is None:
         st.error("Please provide a valid TLE first.")
     else:
@@ -219,31 +224,42 @@ if compute_btn:
                 sat_aim = SatAim(tle_lines, sat_name, lat, lon, height_m)
                 try:
                     pass_info = sat_aim.next_pass(t_center, max_search_h=24)
-                    st.warning(
-                        f"Satellite is **below the horizon** at the requested time "
-                        f"(el = {sat_aim.state_at(t_center).el_deg:.1f}°).\n\n"
-                        f"**Next pass:**  "
-                        f"rise {pass_info.rise_utc.strftime('%H:%M:%S')} UTC "
-                        f"(az {pass_info.rise_az_deg:.0f}°) → "
-                        f"peak {pass_info.peak_utc.strftime('%H:%M:%S')} UTC "
-                        f"(el {pass_info.max_el_deg:.1f}°) → "
-                        f"set {pass_info.set_utc.strftime('%H:%M:%S')} UTC "
-                        f"(az {pass_info.set_az_deg:.0f}°)  "
-                        f"— duration {pass_info.duration_s:.0f} s"
-                    )
-                    # Offer a button to jump to the pass peak time.
-                    if st.button(
-                        f"Use peak time ({pass_info.peak_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC)",
-                        type="primary",
-                    ):
-                        st.session_state["_jump_time"] = pass_info.peak_utc
-                        st.rerun()
+                    st.session_state[PASS_SUGGESTION_KEY] = {
+                        "current_el_deg": sat_aim.state_at(t_center).el_deg,
+                        "pass_info": pass_info,
+                    }
                 except ValueError as exc2:
-                    st.error(f"Satellite is below horizon and no pass found in 24 h: {exc2}")
+                    st.error(
+                        f"Satellite is below horizon and no pass found in 24 h: {exc2}"
+                    )
             else:
                 st.error(f"Computation failed: {exc}")
         except Exception as exc:
             st.error(f"Computation failed: {exc}")
+
+
+_pass_suggestion = st.session_state.get(PASS_SUGGESTION_KEY)
+if _pass_suggestion is not None:
+    pass_info: PassInfo = _pass_suggestion["pass_info"]
+    st.warning(
+        f"Satellite is **below the horizon** at the requested time "
+        f"(el = {_pass_suggestion['current_el_deg']:.1f}°).\n\n"
+        f"**Next pass:**  "
+        f"rise {pass_info.rise_utc.strftime('%H:%M:%S')} UTC "
+        f"(az {pass_info.rise_az_deg:.0f}°) -> "
+        f"peak {pass_info.peak_utc.strftime('%H:%M:%S')} UTC "
+        f"(el {pass_info.max_el_deg:.1f}°) -> "
+        f"set {pass_info.set_utc.strftime('%H:%M:%S')} UTC "
+        f"(az {pass_info.set_az_deg:.0f}°)  "
+        f"-- duration {pass_info.duration_s:.0f} s"
+    )
+    st.button(
+        f"Use peak time ({pass_info.peak_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC)",
+        type="primary",
+        key="_use_peak_time",
+        on_click=_use_peak_time,
+        args=(pass_info.peak_utc,),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +387,9 @@ with tab2:
 
         # Vertical line at scene center.
         fig.add_vline(
-            x=t_center, line_dash="dash", line_color="green",
+            x=t_center,
+            line_dash="dash",
+            line_color="green",
             annotation_text="Scene center",
         )
 
@@ -382,11 +400,25 @@ with tab2:
             # Off-boresight is not directly plotted as a y-value, so skip hlines.
             pass
         elif crit == "azimuth":
-            fig.add_hline(y=ref_state.az_true_deg + hw, line_dash="dot", line_color="orange")
-            fig.add_hline(y=ref_state.az_true_deg - hw, line_dash="dot", line_color="orange")
+            fig.add_hline(
+                y=ref_state.az_true_deg + hw, line_dash="dot", line_color="orange"
+            )
+            fig.add_hline(
+                y=ref_state.az_true_deg - hw, line_dash="dot", line_color="orange"
+            )
         elif crit == "elevation":
-            fig.add_hline(y=ref_state.el_deg + hw, line_dash="dot", line_color="orange", yaxis="y2")
-            fig.add_hline(y=ref_state.el_deg - hw, line_dash="dot", line_color="orange", yaxis="y2")
+            fig.add_hline(
+                y=ref_state.el_deg + hw,
+                line_dash="dot",
+                line_color="orange",
+                yaxis="y2",
+            )
+            fig.add_hline(
+                y=ref_state.el_deg - hw,
+                line_dash="dot",
+                line_color="orange",
+                yaxis="y2",
+            )
 
         # Shaded window region.
         fig.add_vrect(
@@ -517,7 +549,9 @@ with tab4:
         # Approximate: 1 deg lat ~ 111 km, 1 deg lon ~ 111*cos(lat) km.
         dist_deg = 1.0  # roughly 111 km
         end_lat = lat + dist_deg * math.cos(az_rad)
-        end_lon = lon + dist_deg * math.sin(az_rad) / max(math.cos(math.radians(lat)), 0.01)
+        end_lon = lon + dist_deg * math.sin(az_rad) / max(
+            math.cos(math.radians(lat)), 0.01
+        )
         folium.PolyLine(
             locations=[[lat, lon], [end_lat, end_lon]],
             color="red",
@@ -673,11 +707,15 @@ This is the primary criterion used to define the pointing window.
 
     # Vertical lines at window boundaries.
     fig_solver.add_vline(
-        x=-window.minus_s, line_dash="dot", line_color="purple",
+        x=-window.minus_s,
+        line_dash="dot",
+        line_color="purple",
         annotation_text="Window start",
     )
     fig_solver.add_vline(
-        x=window.plus_s, line_dash="dot", line_color="purple",
+        x=window.plus_s,
+        line_dash="dot",
+        line_color="purple",
         annotation_text="Window stop",
     )
 
