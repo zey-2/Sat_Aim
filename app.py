@@ -590,16 +590,7 @@ with tab5:
 # ===== Tab 6 -- Methodology ================================================
 
 
-def _render_methodology(
-    ref_state: LosState,
-    sat_aim: SatAim,
-    t_center: datetime,
-    half_width: float,
-    window: Window,
-    mag_dec: float,
-) -> None:
-    """Render the methodology tab content with dynamic diagrams."""
-
+with tab6:
     # --- Section 1: Scene Center Geometry ------------------------------------
     st.subheader("1. Scene Center Geometry")
     st.markdown(
@@ -639,100 +630,109 @@ This is the primary criterion used to define the pointing window.
     )
 
     # --- Section 3: Solver Diagram ------------------------------------------
-    st.subheader("3. Solver Diagram")
+    if _results is not None:
+        st.subheader("3. Solver Diagram")
 
-    # Build f(t) = off_boresight_deg over the search range.
-    half_dur = max(window.duration_s / 2.0 + 5.0, 30.0)
-    dt_offsets = np.arange(-half_dur, half_dur + 1.0, 1.0)
-    f_values = []
-    for dt_s in dt_offsets:
-        t_i = t_center + timedelta(seconds=float(dt_s))
-        st_i = sat_aim.state_at(t_i)
-        val = sat_aim.off_boresight_deg(ref_state.los_enu_unit, st_i.los_enu_unit)
-        f_values.append(val)
+        ref_state: LosState = _results["ref_state"]
+        sat_aim: SatAim = _results["sat_aim"]
+        t_center = _results["t_center"]
+        half_width = _results["half_width"]
+        window: Window = _results["window"]
 
-    fig_solver = go.Figure()
+        # Build f(t) = off_boresight_deg over the search range.
+        half_dur = max(window.duration_s / 2.0 + 5.0, 30.0)
+        dt_offsets = np.arange(-half_dur, half_dur + 1.0, 1.0)
+        f_values = []
+        for dt_s in dt_offsets:
+            t_i = t_center + timedelta(seconds=float(dt_s))
+            st_i = sat_aim.state_at(t_i)
+            val = sat_aim.off_boresight_deg(ref_state.los_enu_unit, st_i.los_enu_unit)
+            f_values.append(val)
 
-    # f(t) curve.
-    fig_solver.add_trace(
-        go.Scatter(
-            x=dt_offsets,
-            y=f_values,
-            mode="lines",
-            name="f(t) = off-boresight (deg)",
-            line=dict(color="royalblue", width=2),
-        )
-    )
+        fig_solver = go.Figure()
 
-    # Coarse scan points (every 1 s) -- orange dots.
-    fig_solver.add_trace(
-        go.Scatter(
-            x=dt_offsets[::1],
-            y=f_values[::1],
-            mode="markers",
-            name="Coarse scan (1 s)",
-            marker=dict(color="orange", size=4),
-        )
-    )
-
-    # Threshold line.
-    fig_solver.add_hline(
-        y=half_width,
-        line_dash="dash",
-        line_color="red",
-        annotation_text=f"Threshold = {half_width} deg",
-    )
-
-    # Green shaded regions for brackets (where f(t) < half_width).
-    in_bracket = [v < half_width for v in f_values]
-    # Find contiguous bracket regions.
-    bracket_starts: list[int] = []
-    bracket_ends: list[int] = []
-    for i, ib in enumerate(in_bracket):
-        if ib and (i == 0 or not in_bracket[i - 1]):
-            bracket_starts.append(i)
-        if ib and (i == len(in_bracket) - 1 or not in_bracket[i + 1]):
-            bracket_ends.append(i)
-    for bs, be in zip(bracket_starts, bracket_ends):
-        fig_solver.add_vrect(
-            x0=dt_offsets[bs],
-            x1=dt_offsets[be],
-            fillcolor="LightGreen",
-            opacity=0.3,
-            line_width=0,
+        # f(t) curve.
+        fig_solver.add_trace(
+            go.Scatter(
+                x=dt_offsets,
+                y=f_values,
+                mode="lines",
+                name="f(t) = off-boresight (deg)",
+                line=dict(color="royalblue", width=2),
+            )
         )
 
-    # Blue vertical line at scene center (dt=0).
-    fig_solver.add_vline(x=0, line_dash="solid", line_color="blue", line_width=2)
+        # Coarse scan points (every 1 s) -- orange dots.
+        fig_solver.add_trace(
+            go.Scatter(
+                x=dt_offsets[::1],
+                y=f_values[::1],
+                mode="markers",
+                name="Coarse scan (1 s)",
+                marker=dict(color="orange", size=4),
+            )
+        )
 
-    # Vertical lines at window boundaries.
-    fig_solver.add_vline(
-        x=-window.minus_s,
-        line_dash="dot",
-        line_color="purple",
-        annotation_text="Window start",
-    )
-    fig_solver.add_vline(
-        x=window.plus_s,
-        line_dash="dot",
-        line_color="purple",
-        annotation_text="Window stop",
-    )
+        # Threshold line.
+        fig_solver.add_hline(
+            y=half_width,
+            line_dash="dash",
+            line_color="red",
+            annotation_text=f"Threshold = {half_width} deg",
+        )
 
-    fig_solver.update_layout(
-        xaxis_title="Time offset from scene center (s)",
-        yaxis_title="Off-boresight angle (deg)",
-        title="Solver: f(t) and bracket detection",
-        height=450,
-    )
-    st.plotly_chart(fig_solver, width="stretch")
+        # Green shaded regions for brackets (where f(t) < half_width).
+        in_bracket = [v < half_width for v in f_values]
+        # Find contiguous bracket regions.
+        bracket_starts: list[int] = []
+        bracket_ends: list[int] = []
+        for i, ib in enumerate(in_bracket):
+            if ib and (i == 0 or not in_bracket[i - 1]):
+                bracket_starts.append(i)
+            if ib and (i == len(in_bracket) - 1 or not in_bracket[i + 1]):
+                bracket_ends.append(i)
+        for bs, be in zip(bracket_starts, bracket_ends):
+            fig_solver.add_vrect(
+                x0=dt_offsets[bs],
+                x1=dt_offsets[be],
+                fillcolor="LightGreen",
+                opacity=0.3,
+                line_width=0,
+            )
+
+        # Blue vertical line at scene center (dt=0).
+        fig_solver.add_vline(x=0, line_dash="solid", line_color="blue", line_width=2)
+
+        # Vertical lines at window boundaries.
+        fig_solver.add_vline(
+            x=-window.minus_s,
+            line_dash="dot",
+            line_color="purple",
+            annotation_text="Window start",
+        )
+        fig_solver.add_vline(
+            x=window.plus_s,
+            line_dash="dot",
+            line_color="purple",
+            annotation_text="Window stop",
+        )
+
+        fig_solver.update_layout(
+            xaxis_title="Time offset from scene center (s)",
+            yaxis_title="Off-boresight angle (deg)",
+            title="Solver: f(t) and bracket detection",
+            height=450,
+        )
+        st.plotly_chart(fig_solver, width="stretch")
 
     # --- Section 4: Magnetic Declination ------------------------------------
-    st.subheader("4. Magnetic Declination")
-    lat_site = sat_aim.lat
-    lon_site = sat_aim.lon
-    st.markdown(
-        f"""
+    if _results is not None:
+        st.subheader("4. Magnetic Declination")
+        lat_site = sat_aim.lat
+        lon_site = sat_aim.lon
+        mag_dec = _results["mag_dec"]
+        st.markdown(
+            f"""
 The **World Magnetic Model (WMM 2025)** is used to convert true azimuth to
 magnetic azimuth:
 
@@ -748,7 +748,7 @@ At the observer location (lat={lat_site:.2f} / lon={lon_site:.2f}), the model gi
 | True azimuth | {ref_state.az_true_deg:.2f} deg |
 | Magnetic azimuth | {ref_state.az_mag_deg:.2f} deg |
 """
-    )
+        )
 
     # --- Section 5: Assumptions & Limitations --------------------------------
     st.subheader("5. Assumptions & Limitations")
@@ -787,17 +787,3 @@ At the observer location (lat={lat_site:.2f} / lon={lon_site:.2f}), the model gi
 - [pygeomag](https://pypi.org/project/pygeomag/) -- Python WMM implementation.
 """
     )
-
-
-with tab6:
-    if _results is None:
-        st.info("Press **Compute** in the sidebar to generate results.")
-    else:
-        _render_methodology(
-            ref_state=_results["ref_state"],
-            sat_aim=_results["sat_aim"],
-            t_center=_results["t_center"],
-            half_width=_results["half_width"],
-            window=_results["window"],
-            mag_dec=_results["mag_dec"],
-        )
