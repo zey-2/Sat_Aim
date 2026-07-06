@@ -98,10 +98,15 @@ st.sidebar.header("Scene Center Time (UTC)")
 
 # Pre-fill from session state if user jumped to a pass time.
 _jump: datetime | None = st.session_state.pop("_jump_time", None)
-_default_dt = _jump if _jump is not None else datetime(2026, 7, 7, 14, 23, 11)
+if _jump is not None:
+    st.session_state["_scene_date"] = _jump.date()
+    st.session_state["_scene_time"] = _jump.time()
 
-scene_date = st.sidebar.date_input("Date", value=_default_dt.date())
-scene_time = st.sidebar.time_input("Time", value=_default_dt.time(), step=60)
+_default_date = st.session_state.get("_scene_date", datetime(2026, 7, 7).date())
+_default_time = st.session_state.get("_scene_time", datetime(2026, 7, 7, 14, 23, 11).time())
+
+scene_date = st.sidebar.date_input("Date", value=_default_date, key="_scene_date")
+scene_time = st.sidebar.time_input("Time", value=_default_time, step=60, key="_scene_time")
 
 st.sidebar.divider()
 st.sidebar.header("Window Parameters")
