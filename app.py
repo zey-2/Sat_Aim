@@ -60,7 +60,7 @@ def _use_peak_time(peak_utc: datetime) -> None:
 
 st.sidebar.header("TLE Source")
 
-tle_mode = st.sidebar.selectbox("TLE input mode", ["Celestrak", "Paste TLE"])
+tle_mode = st.sidebar.selectbox("TLE input mode", ["Paste TLE", "Celestrak"])
 
 tle_lines: tuple[str, str] | None = None
 sat_name: str | None = None
@@ -103,7 +103,7 @@ lon = st.sidebar.number_input("Longitude (deg)", value=103.85, step=0.01, format
 height_m = st.sidebar.slider("Site height (m)", min_value=0, max_value=5000, value=20)
 
 st.sidebar.divider()
-st.sidebar.header("Scene Center Time (UTC)")
+st.sidebar.header("Satellite Time (UTC)")
 
 st.session_state.setdefault(SCENE_DATE_KEY, datetime(2026, 7, 7).date())
 st.session_state.setdefault(SCENE_TIME_KEY, datetime(2026, 7, 7, 14, 23, 11).time())
@@ -488,7 +488,7 @@ with tab3:
                 r=[center_r],
                 theta=[center_az],
                 mode="markers",
-                name="Scene center",
+                name="Satellite",
                 marker=dict(color="green", size=12, symbol="x"),
             )
         )
